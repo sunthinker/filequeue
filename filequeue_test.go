@@ -1,7 +1,7 @@
 package filequeue_test
 
 import (
-	"filequeue"
+	"github.com/sunthinker/filequeue"
 	"testing"
 	"unsafe"
 )
