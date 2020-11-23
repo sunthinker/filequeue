@@ -1,10 +1,13 @@
 # filequeue
-Implement queue operations in a file（在文件中实现队列操作）
+**Implement queue operations in a file（在文件中实现队列操作）**
 # config.json
-datasize -> unsafe.Sizeof(var),变量占用的内存空间大小
+**datasize -> unsafe.Sizeof(var),变量占用的内存空间大小**
 # quick start
-1、配置好config.json
-2、
+**1、配置好config.json**
+
+**2、代码样例**
+
+```golang
 package main
 import (
     "fmt"
@@ -13,8 +16,8 @@ import (
 
 func main() {
     var opt filequeue.FileOpt
-
     opt.Data = ...  //send data([]byte)
     opt.Send()
     recv = opt.Recv()
 }
+```
