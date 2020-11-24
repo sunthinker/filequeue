@@ -155,6 +155,7 @@ func (fop *FileOpt) Recv() []byte {
 
 //更新文件头(读/写的seek位置)
 func (fop *FileOpt) SaveHead() {
+	filemutex.Lock()
 	//打开文件
 	file, _ := os.OpenFile(config.FilePath, os.O_WRONLY, 0666)
 	defer file.Close()
@@ -162,4 +163,5 @@ func (fop *FileOpt) SaveHead() {
 	data := *((*([unsafe.Sizeof(head)]byte))(unsafe.Pointer(&head)))
 	//写头，固定长度
 	file.WriteAt(data[0:unsafe.Sizeof(head)], 0)
+	filemutex.Unlock()
 }
