@@ -1,5 +1,5 @@
 {
-	"datasize":56,
-	"maxnum":2000,
-	"filepath":"./filetest.info"
+	"data_size":56,
+	"max_num":2000,
+	"file_path":"./filetest.info"
 }

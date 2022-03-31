@@ -2,166 +2,189 @@ package filequeue
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"sync"
 	"unsafe"
 )
 
 type Conf struct {
-	DataSize int    `json:"datasize"` //数据结构大小
-	MaxNum   int    `json:"maxnum"`   //最大数据量maxnum*datasize
-	FilePath string `json:"filepath"` //文件名(包含路径)
-}
-
-type FileOpt struct {
-	Data  []byte
-	mutex sync.Mutex
+	DataSize int    `json:"data_size"` //the struct data size
+	MaxNum   int    `json:"max_num"`   //DataSize*MaxNum
+	FilePath string `json:"file_path"` //file path
 }
 
 type Header struct {
-	WriteSeek int64 `json:"writeseek"` //写文件位置指针
-	ReadSeek  int64 `json:"readseek"`  //读文件位置指针
-	Empty     bool  `json:"empty"`     //文件空
-	Full      bool  `json:"full"`      //文件满
+	WriteSeek int64 `json:"write_seek"` //write seek pos
+	ReadSeek  int64 `json:"read_seek"`  //read seek pos
+	Empty     bool  `json:"empty"`      //file is empty
+	Full      bool  `json:"full"`       //file is full
 }
 
-const (
-	ConfFilePath = "./config.json"
+type FileOpt struct {
+	C Conf
+	H Header
+	D []byte
+	L *sync.Mutex
+}
+
+var (
+	optLock sync.Mutex
 )
 
-//配置
-var config Conf
+/*
+ * new a Fileoption obj
+ */
+func New(conf string) *FileOpt {
+	fopt := FileOpt{}
+	fopt.L = &optLock
 
-//文件头
-var head Header
-
-//文件锁
-var filemutex sync.Mutex
-
-//初始化读取配置，重载文件头(seek)
-func init() {
-	rbuff := make([]byte, 128)
-
-	//读取配置文件
-	file, err := os.OpenFile(ConfFilePath, os.O_RDONLY, 0666)
-	//加载配置失败，直接退出
+	fopt.L.Lock()
+	rbuf := make([]byte, 128)
+	//## 1、read config file
+	f1, err := os.OpenFile(conf, os.O_RDONLY, 0666)
+	defer f1.Close()
+	//if open config file err then panic
 	if err != nil {
-		file.Close()
-		panic("Loading Config Failed...")
+		panic("Loading config failed.")
 	}
-	n, _ := file.Read(rbuff)
-	_ = json.Unmarshal(rbuff[:n], &config)
-	//如果文件路径为空，则判断配置错误，直接退出
-	if config.FilePath == "" {
-		file.Close()
-		panic("Config File Error...")
+	n, _ := f1.Read(rbuf)
+	json.Unmarshal(rbuf[:n], &(fopt.C))
+	//if parse file path err then panic
+	if fopt.C.FilePath == "" {
+		panic("File path is nil.")
 	}
-	file.Close()
-
-	//重载头(seek)
-	file, err = os.OpenFile(config.FilePath, os.O_RDONLY, 0666)
-	//defer file.Close()
-	//重置文件
+	//## 2、read file and reload head
+	f2, err := os.OpenFile(fopt.C.FilePath, os.O_RDONLY, 0666)
+	defer f2.Close()
+	//if open file err, then reset file(os.CREATE|os.O_TRUNC)
 	if err != nil {
-		//打开失败则新建(覆盖)
-		file, _ := os.OpenFile(config.FilePath, os.O_CREATE|os.O_TRUNC, 0666)
-		file.Close()
-		//注意seek要偏移文件头位置
-		head.WriteSeek = (int64)(unsafe.Sizeof(head))
-		head.ReadSeek = (int64)(unsafe.Sizeof(head))
-		head.Empty = true
-		head.Full = false
-		//创建新文件头
-		new(FileOpt).SaveHead()
+		//create file
+		f3, _ := os.OpenFile(fopt.C.FilePath, os.O_CREATE|os.O_TRUNC, 0666)
+		defer f3.Close()
+		//note: the init seek must offset head-size
+		fopt.H.WriteSeek = (int64)(unsafe.Sizeof(fopt.H))
+		fopt.H.ReadSeek = (int64)(unsafe.Sizeof(fopt.H))
+		fopt.H.Empty = true
+		fopt.H.Full = false
+		//save init head
+		fopt.SetHead()
 	} else {
-		//读固定长度
-		buf := make([]byte, unsafe.Sizeof(head))
-		file.Read(buf)
-		//注意[]byte的底层结构（切片）
-		head = **(**Header)(unsafe.Pointer(&buf))
-		file.Close()
+		//read
+		buf := make([]byte, unsafe.Sizeof(fopt.H))
+		f2.Read(buf)
+		//[]byte convert to head struct
+		fopt.H = **(**Header)(unsafe.Pointer(&buf))
 	}
-
+	fopt.L.Unlock()
+	return &fopt
 }
 
-//写文件队列
-func (fop *FileOpt) Send() {
-	//fop.mutex.Lock()
-	//fop.mutex.Unlock()
-	//打开文件(创建)
-	if head.Full == false {
-		file, _ := os.OpenFile(config.FilePath, os.O_WRONLY, 0666)
-		defer file.Close()
-		n, err := file.WriteAt(fop.Data[0:config.DataSize], head.WriteSeek)
-		if n == config.DataSize && err == nil {
-			head.Empty = false
-			//write seek移位，注意归0处理
-			head.WriteSeek += (int64)(config.DataSize)
-			head.WriteSeek %= (int64)(config.MaxNum) * (int64)(config.DataSize)
-			if head.WriteSeek == 0 {
-				head.WriteSeek = (int64)(unsafe.Sizeof(head))
+/*
+ * write file queue
+ */
+func (fopt *FileOpt) Send() error {
+	fopt.L.Lock()
+	fopt.GetHead()
+	if fopt.H.Full == false {
+		//open file
+		f, _ := os.OpenFile(fopt.C.FilePath, os.O_WRONLY, 0666)
+		defer f.Close()
+		n, err := f.WriteAt(fopt.D[0:fopt.C.DataSize], fopt.H.WriteSeek)
+		//write ok then update head
+		if n == fopt.C.DataSize && err == nil {
+			fopt.H.Empty = false
+			//cyclically move the write seek
+			fopt.H.WriteSeek += (int64)(fopt.C.DataSize)
+			fopt.H.WriteSeek %= (int64)(fopt.C.MaxNum) * (int64)(fopt.C.DataSize)
+			if fopt.H.WriteSeek == 0 {
+				fopt.H.WriteSeek = (int64)(unsafe.Sizeof(fopt.H))
 			}
-			//读/写seek相等时，文件满
-			if head.WriteSeek == head.ReadSeek {
-				head.Full = true
+			//if read seek == write seek then file is full
+			if fopt.H.WriteSeek == fopt.H.ReadSeek {
+				fopt.H.Full = true
 			} else {
-				head.Full = false
+				fopt.H.Full = false
 			}
-			new(FileOpt).SaveHead()
+			fopt.SetHead()
 		} else {
-			fmt.Println("Write Data Failed...")
+			//log.Println("Write Data Failed.")
+			fopt.L.Unlock()
+			return errors.New("Write Data Failed.")
 		}
 	} else {
-		fmt.Println("The File Queue is Full..")
+		//log.Println("The File Queue is Full.")
+		fopt.L.Unlock()
+		return errors.New("The File Queue is Full.")
 	}
+	fopt.L.Unlock()
+	return nil
 }
 
-//读文件队列
-func (fop *FileOpt) Recv() []byte {
-	if head.Empty == false {
-		file, _ := os.OpenFile(config.FilePath, os.O_RDONLY, 0666)
-		defer file.Close()
-		//读固定长度
-		buf := make([]byte, config.DataSize)
-		n, err := file.ReadAt(buf, head.ReadSeek)
-		if n == config.DataSize && err == nil {
-			head.Full = false
-			//read seek移位，注册归0处理
-			head.ReadSeek += (int64)(config.DataSize)
-			head.ReadSeek %= (int64)(config.MaxNum) * (int64)(config.DataSize)
-			if head.ReadSeek == 0 {
-				head.ReadSeek = (int64)(unsafe.Sizeof(head))
+/*
+ * read file queue
+ */
+func (fopt *FileOpt) Recv() ([]byte, error) {
+	fopt.L.Lock()
+	fopt.GetHead()
+	if fopt.H.Empty == false {
+		f, _ := os.OpenFile(fopt.C.FilePath, os.O_RDONLY, 0666)
+		defer f.Close()
+		//read
+		buf := make([]byte, fopt.C.DataSize)
+		n, err := f.ReadAt(buf, fopt.H.ReadSeek)
+		if n == fopt.C.DataSize && err == nil {
+			fopt.H.Full = false
+			//cyclically move the read seek
+			fopt.H.ReadSeek += (int64)(fopt.C.DataSize)
+			fopt.H.ReadSeek %= (int64)(fopt.C.MaxNum) * (int64)(fopt.C.DataSize)
+			if fopt.H.ReadSeek == 0 {
+				fopt.H.ReadSeek = (int64)(unsafe.Sizeof(fopt.H))
 			}
-			//读/写seek相等，文件空
-			if head.ReadSeek == head.WriteSeek {
-				head.Empty = true
+			//if read seek == write seek then file is empty
+			if fopt.H.ReadSeek == fopt.H.WriteSeek {
+				fopt.H.Empty = true
 			} else {
-				head.Empty = false
+				fopt.H.Empty = false
 			}
-			new(FileOpt).SaveHead()
-			//fop.Data = buf
-			return buf
+			fopt.SetHead()
+			fopt.L.Unlock()
+			return buf, nil
 		} else {
-			fmt.Println("Read Data Failed...")
-			return nil
+			//log.Println("Read Data Failed.")
+			fopt.L.Unlock()
+			return nil, errors.New("Read Data Failed.")
 		}
 	} else {
-		fmt.Println("The File Queue is Empty")
-		return nil
+		//log.Println("The File Queue is Empty")
+		fopt.L.Unlock()
+		return nil, errors.New("The File Queue is Empty.")
 	}
 
 }
 
-//更新文件头(读/写的seek位置)
-func (fop *FileOpt) SaveHead() {
-	filemutex.Lock()
-	//打开文件
-	file, _ := os.OpenFile(config.FilePath, os.O_WRONLY, 0666)
-	defer file.Close()
-	//将结构体类型的头，转换为[]byte类型
-	data := *((*([unsafe.Sizeof(head)]byte))(unsafe.Pointer(&head)))
-	//写头，固定长度
-	file.WriteAt(data[0:unsafe.Sizeof(head)], 0)
-	filemutex.Unlock()
+/*
+ * Update the head
+ */
+func (fopt *FileOpt) SetHead() {
+	//open file
+	f, _ := os.OpenFile(fopt.C.FilePath, os.O_WRONLY, 0666)
+	defer f.Close()
+	//convert struct to []byte
+	data := *((*([unsafe.Sizeof(fopt.H)]byte))(unsafe.Pointer(&(fopt.H))))
+	//write at pos 0(the head pos)
+	f.WriteAt(data[0:unsafe.Sizeof(fopt.H)], 0)
+}
+
+/*
+ * Get Head
+ */
+func (fopt *FileOpt) GetHead() {
+	f, _ := os.OpenFile(fopt.C.FilePath, os.O_RDONLY, 0666)
+	defer f.Close()
+	//read
+	buf := make([]byte, unsafe.Sizeof(fopt.H))
+	f.Read(buf)
+	//[]byte convert to head struct
+	fopt.H = **(**Header)(unsafe.Pointer(&buf))
 }

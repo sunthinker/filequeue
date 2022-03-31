@@ -1,9 +1,11 @@
 package filequeue_test
 
 import (
-	"github.com/sunthinker/filequeue"
+	"sync"
 	"testing"
 	"unsafe"
+
+	"github.com/sunthinker/filequeue"
 )
 
 type addTxs struct {
@@ -11,7 +13,6 @@ type addTxs struct {
 	txs     int
 }
 
-var opt filequeue.FileOpt
 var add1 addTxs
 var add2 addTxs
 
@@ -21,21 +22,51 @@ const (
 )
 
 func TestFileWR(t *testing.T) {
-	for i := 0; i < maxtestnum; i++ {
-		copy(add1.address[:], str[:])
-		add1.txs = i
-		//将结构体类型，转换为[]byte类型
-		data := *((*([unsafe.Sizeof(add1)]byte))(unsafe.Pointer(&add1)))
-		opt.Data = data[:]
 
-		opt.Send()
-		rd := opt.Recv()
-
-		//将[]byte类型数据转为结构体类型
-		add2 = **(**addTxs)(unsafe.Pointer(&rd))
-		//比读写是否一致
-		if add2.address != add1.address || add2.txs != add1.txs {
-			t.Fail()
-		}
+	var wg sync.WaitGroup
+	//send
+	for i := 0; i < maxtestnum/100; i++ {
+		wg.Add(1)
+		go func() {
+			opt := filequeue.New("./config.json")
+			for j := 0; j < 100; j++ {
+				copy(add1.address[:], str[:])
+				add1.txs = j * maxtestnum
+				data := *((*([unsafe.Sizeof(add1)]byte))(unsafe.Pointer(&add1)))
+				opt.D = data[:]
+				for {
+					err := opt.Send()
+					if err != nil {
+						continue
+					} else {
+						break
+					}
+				}
+			}
+			wg.Done()
+		}()
 	}
+
+	//read
+	wg.Add(1)
+	go func() {
+		opt := filequeue.New("./config.json")
+		count := 0
+		for {
+			rd, _ := opt.Recv()
+			if rd != nil {
+				count++
+				add2 = **(**addTxs)(unsafe.Pointer(&rd))
+				if add2.address != add1.address {
+					t.Fail()
+				}
+			}
+			if rd == nil && count == maxtestnum {
+				wg.Done()
+				return
+			}
+		}
+
+	}()
+	wg.Wait()
 }
